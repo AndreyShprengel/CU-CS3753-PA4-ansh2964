@@ -24,6 +24,7 @@
 
 #define FUSE_USE_VERSION 28
 #define HAVE_SETXATTR
+#define XATRR_ENCRYPTED_FLAG "user.pa4-encfs.encrypted"
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -33,7 +34,9 @@
 /* For pread()/pwrite() */
 #define _XOPEN_SOURCE 500
 #endif
+#define _POSIX_C_SOURCE 200809L
 
+#include "aes-crypt.h"
 #include <fuse.h>
 #include <stdio.h>
 #include <string.h>
@@ -46,6 +49,7 @@
 #include <stddef.h>
 #include <sys/types.h>
 #include <limits.h>
+
 #ifdef HAVE_SETXATTR
 #include <sys/xattr.h>
 #endif
@@ -299,16 +303,43 @@ static int xmp_read(const char *path, char *buf, size_t size, off_t offset,
 	int res;
 	char fpath[PATH_MAX];
 	xmp_fullpath(fpath, path);
-	(void) fi;
-	fd = open(fpath, O_RDONLY);
-	if (fd == -1)
-		return -errno;
+	FILE *stream;
+	FILE* inFile = NULL;
+    char *buffer;
+    size_t len;
+	char key_phrase[] = "password";
 
-	res = pread(fd, buf, size, offset);
-	if (res == -1)
+    stream = open_memstream(&buffer, &len);
+    if (stream == NULL)
+        return -errno;
+	(void) fi;
+	inFile = fopen(fpath, "rb");
+	 if(!inFile){
+	perror("infile fopen error");
+	return EXIT_FAILURE;
+    }
+    if(!do_crypt(inFile, stream, 0, key_phrase)){
+		fprintf(stderr, "do_crypt failed\n");
+		fd = open(fpath, O_RDONLY);
+		if (fd == -1)
+			return -errno;
+
+		res = pread(fd, buf, size, offset);
+		if (res == -1)
 		res = -errno;
 
-	close(fd);
+		close(fd);
+		return res;
+    }
+    res = fread(buf, 1, len, stream);
+    if (res == -1)
+    	res = -errno;
+
+	fclose(stream);
+	fclose(inFile);
+
+	free(buffer);
+
 	return res;
 }
 
@@ -469,6 +500,7 @@ int main(int argc, char *argv[])
      // Pull the rootdir out of the argument list and save it in my
     // internal data
     xmp_data->mirror_dir = realpath(argv[argc-2], NULL);
+    
     argv[argc-2] = argv[argc-1];
     argv[argc-1] = NULL;
     argc--;
