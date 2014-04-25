@@ -25,6 +25,9 @@
 #define FUSE_USE_VERSION 28
 #define HAVE_SETXATTR
 #define XATRR_ENCRYPTED_FLAG "user.pa4-encfs.encrypted"
+#define ENCRYPT 1
+#define DECRYPT 0
+#define PASS_THROUGH -1
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -49,9 +52,15 @@
 #include <stddef.h>
 #include <sys/types.h>
 #include <limits.h>
+#include <sys/xattr.h>
+#include <linux/xattr.h>
 
 #ifdef HAVE_SETXATTR
 #include <sys/xattr.h>
+#endif
+#ifdef linux
+/* Linux is missing ENOATTR error, using ENODATA instead */
+#define ENOATTR ENODATA
 #endif
 // code for mirroring a dircort and xmp_state based of an online toturial  http://www.cs.nmsu.edu/~pfeiffer/fuse-tutorial
 #define XMP_DATA ((struct xmp_state *) fuse_get_context()->private_data)
@@ -299,6 +308,9 @@ static int xmp_open(const char *path, struct fuse_file_info *fi)
 static int xmp_read(const char *path, char *buf, size_t size, off_t offset,
 		    struct fuse_file_info *fi)
 {
+	int action = PASS_THROUGH;
+	ssize_t valsize = 0;
+	char *tmpval = NULL;
 	int fd;
 	int res;
 	char fpath[PATH_MAX];
@@ -308,7 +320,29 @@ static int xmp_read(const char *path, char *buf, size_t size, off_t offset,
     char *buffer;
     size_t len;
 	char key_phrase[] = "password";
-
+	
+	valsize = getxattr(fpath, XATRR_ENCRYPTED_FLAG, NULL, 0);
+	tmpval = malloc(sizeof(*tmpval)*(valsize + 1));
+	
+	if(!tmpval){
+	    perror("malloc of 'tmpval' error");
+	    exit(EXIT_FAILURE);
+	}
+	valsize = getxattr(fpath, XATRR_ENCRYPTED_FLAG, tmpval, valsize);
+		/* If the specified attribute doesn't exist or it's set to false */
+	if (valsize < 0 || memcmp(tmpval, "false", 5) == 0){
+		if(errno == ENOATTR){
+			fprintf(stderr, "Read: No %s attribute set\n", XATRR_ENCRYPTED_FLAG);
+		}
+		fprintf(stderr, "Read: file is unencrypted, leaving crypt_action as pass-through\n");
+	}/* If the attribute exists and is true then we need to get size of decrypted file */
+	else if (memcmp(tmpval, "true", 4) == 0){
+		fprintf(stderr, "Read: file is encrypted, need to decrypt\n");
+		action = DECRYPT;
+	}
+	
+ 
+    
     stream = open_memstream(&buffer, &len);
     if (stream == NULL)
         return -errno;
@@ -318,9 +352,12 @@ static int xmp_read(const char *path, char *buf, size_t size, off_t offset,
 	perror("infile fopen error");
 	return EXIT_FAILURE;
     }
-    if(!do_crypt(inFile, stream, 0, key_phrase)){
+   
+   
+   
+    if(!do_crypt(inFile, stream, action, key_phrase)){
 		fprintf(stderr, "do_crypt failed\n");
-		fd = open(fpath, O_RDONLY);
+		/*fd = open(fpath, O_RDONLY);
 		if (fd == -1)
 			return -errno;
 
@@ -329,7 +366,7 @@ static int xmp_read(const char *path, char *buf, size_t size, off_t offset,
 		res = -errno;
 
 		close(fd);
-		return res;
+		return res;*/
     }
     res = fread(buf, 1, len, stream);
     if (res == -1)
@@ -337,7 +374,7 @@ static int xmp_read(const char *path, char *buf, size_t size, off_t offset,
 
 	fclose(stream);
 	fclose(inFile);
-
+	free(tmpval)
 	free(buffer);
 
 	return res;
